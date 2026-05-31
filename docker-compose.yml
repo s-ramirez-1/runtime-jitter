@@ -1,0 +1,65 @@
+services:
+
+  # -------------------------------------------------------
+  # DASHBOARD — view results in the browser
+  # Usage: docker compose up dashboard
+  # Then open http://localhost:8501
+  # -------------------------------------------------------
+  dashboard:
+    build: .
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./results:/app/results
+      - ./databases:/app/databases
+      - ./plots:/app/plots
+      - ./paper_figures:/app/paper_figures
+      - ./snapshots:/app/snapshots
+
+  # -------------------------------------------------------
+  # PIPELINE — run the full experiment pipeline interactively
+  # Usage: docker compose --profile pipeline run --service-ports pipeline
+  # Then open http://localhost:8501 when dashboard launches
+  # -------------------------------------------------------
+  pipeline:
+    build: .
+    stdin_open: true
+    tty: true
+    ports:
+      - "8501:8501"
+    environment:
+      - RUNNING_IN_DOCKER=1
+    volumes:
+      - ./results:/app/results
+      - ./databases:/app/databases
+      - ./plots:/app/plots
+      - ./paper_figures:/app/paper_figures
+      - ./snapshots:/app/snapshots
+    command: ["python", "scripts/batch_run.py"]
+    profiles:
+      - pipeline
+
+  # -------------------------------------------------------
+  # PIPELINE WITH CPU PINNING — true CPU affinity on Linux
+  # Uses privileged mode and cpuset to pin to core 0
+  # Usage: docker compose --profile cpu run --service-ports cpu_pipeline
+  # -------------------------------------------------------
+  cpu_pipeline:
+    build: .
+    privileged: true
+    cpuset: "0"
+    stdin_open: true
+    tty: true
+    ports:
+      - "8501:8501"
+    environment:
+      - RUNNING_IN_DOCKER=1
+    volumes:
+      - ./results:/app/results
+      - ./databases:/app/databases
+      - ./plots:/app/plots
+      - ./paper_figures:/app/paper_figures
+      - ./snapshots:/app/snapshots
+    command: ["python", "scripts/batch_run.py"]
+    profiles:
+      - cpu

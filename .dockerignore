@@ -1,0 +1,13 @@
+# Don't copy these into the container image
+.venv/
+venv/
+.venv-wsl/
+__pycache__/
+*.pyc
+.git/
+.DS_Store
+results/
+databases/
+plots/
+paper_figures/
+snapshots/
