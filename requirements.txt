@@ -1,0 +1,13 @@
+streamlit
+plotly
+pandas
+numpy
+matplotlib
+gitpython
+pytest
+pyarrow
+pydeck
+requests
+scikit-learn
+scipy
+joblib
