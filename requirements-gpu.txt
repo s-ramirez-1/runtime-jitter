@@ -1,0 +1,6 @@
+# Only needed for --workload gpu. Kept out of requirements.txt so macOS/CPU-only
+# installs stay light. On Linux, the PyPI torch wheel bundles its CUDA runtime;
+# the host only needs the NVIDIA driver.
+torch
+torchvision
+nvidia-ml-py

@@ -1,0 +1,3 @@
+# Optional: only for `batch_run.py --mlflow`. Kept separate because mlflow pins
+# its own pandas/numpy ranges that can conflict with requirements-locked.txt.
+mlflow

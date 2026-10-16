@@ -1,0 +1,33 @@
+# GPU variant of the pipeline image. The CPU Dockerfile is unchanged.
+# Needs the NVIDIA driver and NVIDIA Container Toolkit on the host.
+# Same base as the CPU image so Python/library versions match;
+# the PyPI torch wheel brings its own CUDA runtime libraries.
+FROM --platform=linux/amd64 python:3.12-slim-bookworm
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Locked requirements first (same pins as the CPU image), then GPU packages.
+# After your first successful build, freeze the GPU packages for reproducibility:
+#   docker compose --profile gpu run --rm gpu_pipeline pip freeze > requirements-gpu-locked.txt
+COPY requirements-locked.txt requirements-gpu.txt ./
+RUN pip install --no-cache-dir -r requirements-locked.txt -r requirements-gpu.txt
+
+# Copy project files
+COPY . .
+
+# Always set inside the image so batch_run.py skips venv bootstrap
+ENV RUNNING_IN_DOCKER=1
+
+# nvidia-smi (utility) and CUDA (compute) must both be exposed to the container
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+# Dashboard port
+EXPOSE 8501
+
+CMD ["python", "-m", "streamlit", "run", "scripts/dashboard.py", \
+     "--server.address=0.0.0.0", "--server.port=8501"]

@@ -35,6 +35,45 @@ def get_git_commit():
 
 
 # ----------------------------
+# GPU ENVIRONMENT
+# Records the GPU model, driver, and (if torch is installed)
+# CUDA/cuDNN/PyTorch versions. Either part is None when it
+# isn't available, so this is safe on CPU-only machines.
+# ----------------------------
+def get_gpu_environment():
+    info = {"nvidia_smi": None, "torch": None}
+
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi",
+             "--query-gpu=name,driver_version,memory.total",
+             "--format=csv,noheader"],
+            timeout=10
+        ).decode().strip().splitlines()
+
+        keys = ["name", "driver_version", "memory_total"]
+        info["nvidia_smi"] = [
+            dict(zip(keys, [p.strip() for p in line.split(",")]))
+            for line in out
+        ]
+    except Exception:
+        pass
+
+    try:
+        import torch
+        info["torch"] = {
+            "version": torch.__version__,
+            "cuda": torch.version.cuda,
+            "cudnn": torch.backends.cudnn.version(),
+            "cuda_available": torch.cuda.is_available()
+        }
+    except Exception:
+        pass
+
+    return info
+
+
+# ----------------------------
 # HASH UTILITY
 # ----------------------------
 def compute_hash(folder: Path):
@@ -119,12 +158,21 @@ def create_snapshot(name="run"):
     (folder / "git_commit.txt").write_text(git_commit)
 
     # 2. Environment
+    # Use the running interpreter's pip so the freeze always
+    # describes the environment that actually produced the results.
     try:
-        pip_freeze = subprocess.check_output(["pip", "freeze"]).decode()
+        pip_freeze = subprocess.check_output(
+            [sys.executable, "-m", "pip", "freeze"]
+        ).decode()
     except Exception:
         pip_freeze = "pip freeze failed"
 
     (folder / "requirements_snapshot.txt").write_text(pip_freeze)
+
+    # 2b. GPU environment
+    (folder / "gpu_environment.json").write_text(
+        json.dumps(get_gpu_environment(), indent=2)
+    )
 
     # 3. Results
     results = PROJECT_ROOT / "results"
@@ -160,7 +208,7 @@ def create_snapshot(name="run"):
     # PROVENANCE: RECORD SNAPSHOT IN DB
     # Write this snapshot into the snapshots table so runs
     # can be formally linked to it. Then stamp the snapshot_id
-    # onto any runs whose snapshot_folder matches this one.
+    # onto every run that isn't linked to a snapshot yet.
     # ----------------------------
     db_manager.create_tables()
 

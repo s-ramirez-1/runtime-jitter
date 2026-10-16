@@ -86,9 +86,14 @@ def main():
     parser.add_argument("--stress", action="store_true")
     parser.add_argument("--cpu", type=int, default=None)
     parser.add_argument("--runs", type=int, default=DEFAULT_RUNS)
+    # --- GPU additions ---
+    parser.add_argument("--workload", choices=["cpu", "gpu"], default="cpu")
+    parser.add_argument("--gpu-sample-interval", type=float, default=0.25,
+                        help="GPU telemetry polling interval in seconds (0 disables sampling)")
     args = parser.parse_args()
 
     print(f"[RUN] Experiment: {args.name}")
+    print(f"[INFO] Workload: {args.workload}")
     print(f"[INFO] Stress mode: {args.stress}")
 
     # ----------------------------
@@ -107,7 +112,25 @@ def main():
     # ----------------------------
     # RUN EXPERIMENT
     # ----------------------------
-    times = run_experiment(args.runs, stress=args.stress)
+    gpu_env = None
+    gpu_samples = []
+    gpu_summary = None
+
+    if args.workload == "gpu":
+        # imported lazily so CPU-only machines never need torch
+        import gpu_workload
+        import gpu_sampler
+
+        gpu_env = gpu_workload.environment_info()
+        if args.gpu_sample_interval > 0:
+            with gpu_sampler.GPUSampler(args.gpu_sample_interval) as sampler:
+                times = gpu_workload.run_experiment(args.runs, stress=args.stress)
+            gpu_samples = sampler.samples
+            gpu_summary = gpu_sampler.summarize(gpu_samples) if gpu_samples else None
+        else:
+            times = gpu_workload.run_experiment(args.runs, stress=args.stress)
+    else:
+        times = run_experiment(args.runs, stress=args.stress)
 
     # ----------------------------
     # PATH SETUP (UNCHANGED)
@@ -120,6 +143,9 @@ def main():
 
     csv_path = out_dir / f"{args.name}_{timestamp}.csv"
     meta_path = out_dir / f"{args.name}_{timestamp}_meta.json"
+    # GPU samples go in a JSON sidecar, not a CSV, so scripts that glob results/*.csv
+    # (db_manager.import_all, and probably compare.py) never mistake it for a run file.
+    gpu_path = out_dir / f"{args.name}_{timestamp}_gpu.json"
 
     # ----------------------------
     # METADATA
@@ -132,7 +158,11 @@ def main():
         "cpu": platform.processor(),
         "python_version": platform.python_version(),
         "args": vars(args),
-        "num_runs": args.runs
+        "num_runs": args.runs,
+        # --- GPU additions ---
+        "workload": args.workload,
+        "gpu": gpu_env,
+        "gpu_summary": gpu_summary,
     }
 
     # ----------------------------
@@ -140,6 +170,9 @@ def main():
     # ----------------------------
     save_csv(times, csv_path)
     save_metadata(metadata, meta_path)
+    if gpu_samples:
+        with open(gpu_path, "w") as f:
+            json.dump({"interval_s": args.gpu_sample_interval, "samples": gpu_samples}, f)
 
     # ----------------------------
     # RESULTS PRINT (UPGRADED)
@@ -150,26 +183,18 @@ def main():
     for k in ["mean", "std", "p50", "p95", "p99", "min", "max"]:
         print(f"{k:<12}: {stats[k]:.6f}")
 
+    if gpu_summary:
+        print("\n=== GPU TELEMETRY ===")
+        for k, v in gpu_summary.items():
+            print(f"{k:<16}: {v:.2f}" if isinstance(v, float) else f"{k:<16}: {v}")
+
     print("\nSaved CSV :", csv_path)
     print("Saved META:", meta_path)
+    if gpu_samples:
+        print("Saved GPU :", gpu_path)
 
 # ----------------------------
 # ENTRY POINT
 # ----------------------------
 if __name__ == "__main__":
     main()
-
-# WAYS TO RUN ON LINUX
-"""
-python scripts/BaselineRuntime_JitterMeasurement.py --name baseline
-python scripts/BaselineRuntime_JitterMeasurement.py --name cpu_pinned_0 --cpu 0
-python scripts/BaselineRuntime_JitterMeasurement.py --name cpu_pinned_0_1 --cpu 0,1 # this is the same as above
-python scripts/BaselineRuntime_JitterMeasurement.py --name stress_test --stress
-python scripts/BaselineRuntime_JitterMeasurement.py --name pinned_stress --cpu 0 --stress
-"""
-
-# WAYS TO RUN ON macOS
-"""
-python scripts/BaselineRuntime_JitterMeasurement.py --name baseline
-python scripts/BaselineRuntime_JitterMeasurement.py --name stress_test --stress
-"""

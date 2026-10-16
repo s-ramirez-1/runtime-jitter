@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import hashlib
 import argparse
+import shutil
 import time
 import webbrowser
 
@@ -102,6 +103,16 @@ def load_experiments_from_registry(python_bin):
     db_manager.seed_default_experiments()
 
     experiments = db_manager.get_experiments()
+
+    # GPU experiments stay in the registry, but only run where a GPU is visible.
+    # (The registry lives in a database that native and Docker runs can share.)
+    if not shutil.which("nvidia-smi"):
+        gpu_names = [e["name"] for e in experiments
+                     if db_manager.experiment_workload(e) == "gpu"]
+        if gpu_names:
+            print(f"[REGISTRY] No NVIDIA GPU detected — skipping: {', '.join(gpu_names)}")
+        experiments = [e for e in experiments
+                       if db_manager.experiment_workload(e) != "gpu"]
 
     print(f"\n[REGISTRY] Loaded {len(experiments)} experiment(s) from registry:")
     for exp in experiments:
@@ -213,6 +224,25 @@ def run_database_import(python_bin):
         return True
     except subprocess.CalledProcessError as e:
         print(f"[ERROR] db_manager.py failed (code {e.returncode})")
+        return False
+
+
+# ============================================================
+# MLFLOW EXPORT (optional, enabled with --mlflow)
+# ============================================================
+def run_mlflow_export(python_bin):
+    cmd = [python_bin, str(SCRIPT_DIR / "mlflow_export.py")]
+
+    print("\n==============================")
+    print("[RUN] MLflow Export (mlflow_export.py)")
+    print("==============================")
+
+    try:
+        subprocess.run(cmd, check=True)
+        print("[OK] mlflow_export.py completed")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] mlflow_export.py failed (code {e.returncode})")
         return False
 
 
@@ -348,6 +378,7 @@ def main():
     parser.add_argument("--delete-db",        action="store_true")
     parser.add_argument("--delete-tex",       action="store_true")
     parser.add_argument("--delete-snapshots", action="store_true")
+    parser.add_argument("--mlflow",           action="store_true", help="Export runs to MLflow after DB import")
     args = parser.parse_args()
 
     python_bin = ensure_environment()
@@ -388,6 +419,11 @@ def main():
     if not run_database_import(python_bin):
         print("[STOP] DB import failed — aborting pipeline.")
         return
+
+    # 5b. MLFLOW EXPORT (optional)
+    if args.mlflow:
+        if not run_mlflow_export(python_bin):
+            print("[WARN] MLflow export failed — continuing pipeline.")
 
     # 6. STATISTICAL TESTS
     if not run_stats(python_bin):

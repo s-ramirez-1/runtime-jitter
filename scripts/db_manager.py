@@ -2,6 +2,7 @@
 import sqlite3
 import csv
 import json
+import shutil
 from pathlib import Path
 from datetime import datetime
 
@@ -19,6 +20,18 @@ DB_PATH = DB_DIR / "jitter.db"
 def get_connection():
     DB_DIR.mkdir(parents=True, exist_ok=True)
     return sqlite3.connect(DB_PATH)
+
+
+# ----------------------------
+# ENSURE COLUMN
+# Adds a column to an existing table if it isn't there yet.
+# CREATE TABLE IF NOT EXISTS never alters a table that already
+# exists, so this migrates existing databases in place.
+# ----------------------------
+def ensure_column(cur, table, column, decl):
+    existing = [r[1] for r in cur.execute(f"PRAGMA table_info({table})")]
+    if column not in existing:
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 # ----------------------------
@@ -46,6 +59,19 @@ def create_tables():
             FOREIGN KEY (snapshot_id) REFERENCES snapshots(id)
         )
     """)
+
+    # ----------------------------
+    # GPU COLUMNS ON RUNS
+    # workload is 'cpu' or 'gpu'. Existing rows default to 'cpu'.
+    # ----------------------------
+    for col, decl in [
+        ("workload",      "TEXT DEFAULT 'cpu'"),
+        ("gpu_name",      "TEXT"),
+        ("gpu_driver",    "TEXT"),
+        ("cuda_version",  "TEXT"),
+        ("torch_version", "TEXT"),
+    ]:
+        ensure_column(cur, "runs", col, decl)
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS measurements (
@@ -169,6 +195,27 @@ def create_tables():
         )
     """)
 
+    # ----------------------------
+    # GPU SAMPLES TABLE
+    # GPU telemetry (utilization, memory, power, temperature,
+    # SM clock) sampled during a GPU run by gpu_sampler.py.
+    # Imported from the <run>_gpu.json sidecar file.
+    # ----------------------------
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS gpu_samples (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id   INTEGER NOT NULL,
+            ts       REAL NOT NULL,
+            gpu_idx  INTEGER NOT NULL,
+            util_pct REAL,
+            mem_mib  REAL,
+            power_w  REAL,
+            temp_c   REAL,
+            sm_mhz   REAL,
+            FOREIGN KEY (run_id) REFERENCES runs(id)
+        )
+    """)
+
     con.commit()
     con.close()
     print(f"[DB] Tables ready at: {DB_PATH}")
@@ -233,6 +280,20 @@ def get_experiments():
 
 
 # ----------------------------
+# EXPERIMENT WORKLOAD
+# Returns 'gpu' if an experiment's args select the GPU workload
+# (--workload gpu), otherwise 'cpu'. Analysis scripts use this so
+# CPU and GPU experiments are never compared against each other.
+# ----------------------------
+def experiment_workload(exp):
+    args = exp.get("args", [])
+    for i, a in enumerate(args):
+        if a == "--workload" and i + 1 < len(args):
+            return args[i + 1]
+    return "cpu"
+
+
+# ----------------------------
 # SEED DEFAULT EXPERIMENTS
 # Called once at startup by batch_run.py.
 # Registers the three standard experiments if they don't
@@ -261,6 +322,33 @@ def seed_default_experiments():
         args=["--cpu", "0"],
         execution_mode="pinned"
     )
+
+    # ----------------------------
+    # GPU EXPERIMENTS
+    # Only registered on machines with an NVIDIA GPU, so the
+    # pipeline doesn't abort on a Mac or a CPU-only runner.
+    # ----------------------------
+    if shutil.which("nvidia-smi"):
+        register_experiment(
+            name="gpu_baseline",
+            description="ResNet-18 training step on GPU. No stress, no CPU pinning.",
+            args=["--workload", "gpu"],
+            execution_mode="gpu_baseline"
+        )
+
+        register_experiment(
+            name="gpu_stress",
+            description="ResNet-18 training step on GPU with 4x batch size.",
+            args=["--workload", "gpu", "--stress"],
+            execution_mode="gpu_stress"
+        )
+
+        register_experiment(
+            name="gpu_pinned_0",
+            description="GPU workload with the host process pinned to CPU core 0.",
+            args=["--workload", "gpu", "--cpu", "0"],
+            execution_mode="gpu_pinned"
+        )
 
     print("[DB] Default experiments seeded into registry")
 
@@ -296,10 +384,15 @@ def insert_snapshot(name, folder, hash_, git_commit):
 
 # ----------------------------
 # STAMP SNAPSHOT ON RUNS
-# After a snapshot is created, links every run from this
-# pipeline execution to that snapshot by updating snapshot_id.
-# We match by snapshot_folder so we only update runs from
-# this specific pipeline execution, not all historical runs.
+# After a snapshot is created, links every run that does not
+# yet belong to a snapshot to this one.
+#
+# This previously matched on snapshot_folder, but runs are
+# imported from the measurement metadata, which never contains
+# the folder (the snapshot doesn't exist until after the runs
+# do), so no run was ever linked. Matching on snapshot_id IS NULL
+# means each pipeline execution claims the runs it produced
+# and earlier snapshots keep theirs.
 # ----------------------------
 def stamp_snapshot_on_runs(snapshot_folder, snapshot_id):
     con = get_connection()
@@ -307,8 +400,9 @@ def stamp_snapshot_on_runs(snapshot_folder, snapshot_id):
 
     cur.execute("""
         UPDATE runs
-        SET snapshot_id = ?
-        WHERE snapshot_folder = ?
+        SET snapshot_id = ?,
+            snapshot_folder = ?
+        WHERE snapshot_id IS NULL
     """, (snapshot_id, str(snapshot_folder)))
 
     updated = cur.rowcount
@@ -353,6 +447,7 @@ def insert_run(meta):
     cur = con.cursor()
 
     args = meta.get("args", {})
+    gpu  = meta.get("gpu") or {}
 
     cur.execute("""
         INSERT INTO runs (
@@ -366,8 +461,13 @@ def insert_run(meta):
             stress_mode,
             cpu_pinned,
             snapshot_hash,
-            snapshot_folder
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            snapshot_folder,
+            workload,
+            gpu_name,
+            gpu_driver,
+            cuda_version,
+            torch_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         meta.get("experiment"),
         meta.get("timestamp"),
@@ -379,7 +479,12 @@ def insert_run(meta):
         int(args.get("stress", False)),
         args.get("cpu"),
         meta.get("snapshot_hash"),
-        meta.get("snapshot_folder")
+        meta.get("snapshot_folder"),
+        meta.get("workload", "cpu"),
+        ", ".join(gpu.get("gpu_names", [])) or None,
+        gpu.get("driver_version"),
+        gpu.get("cuda_version"),
+        gpu.get("torch")
     ))
 
     run_id = cur.lastrowid
@@ -412,6 +517,32 @@ def insert_measurements(run_id, csv_path):
     con.close()
 
     print(f"[DB] Inserted {len(rows)} measurements for run_id={run_id}")
+
+
+# ----------------------------
+# INSERT GPU SAMPLES
+# ----------------------------
+def insert_gpu_samples(run_id, samples):
+    if not samples:
+        return
+
+    con = get_connection()
+    cur = con.cursor()
+
+    cur.executemany("""
+        INSERT INTO gpu_samples
+            (run_id, ts, gpu_idx, util_pct, mem_mib, power_w, temp_c, sm_mhz)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, [
+        (run_id, s["ts"], s["gpu_idx"], s.get("util_pct"), s.get("mem_mib"),
+         s.get("power_w"), s.get("temp_c"), s.get("sm_mhz"))
+        for s in samples
+    ])
+
+    con.commit()
+    con.close()
+
+    print(f"[DB] Inserted {len(samples)} GPU samples for run_id={run_id}")
 
 
 # ----------------------------
@@ -455,6 +586,12 @@ def import_run(csv_path, meta_path):
 
     run_id = insert_run(meta)
     insert_measurements(run_id, csv_path)
+
+    # GPU telemetry sidecar written by BaselineRuntime_JitterMeasurement.py
+    gpu_path = csv_path.with_name(f"{csv_path.stem}_gpu.json")
+    if gpu_path.exists():
+        with open(gpu_path, "r") as f:
+            insert_gpu_samples(run_id, json.load(f).get("samples", []))
 
     print(f"[DB] Imported run: {meta.get('experiment')} -> run_id={run_id}")
 
@@ -553,6 +690,27 @@ def print_summary():
     """)
     for row in cur.fetchall():
         print(f"  {row[0]:<20} {row[1]} runs")
+
+    # ----------------------------
+    # GPU SUMMARY
+    # Shows GPU runs by experiment and how much telemetry
+    # was captured for them.
+    # ----------------------------
+    print("\n--- GPU Runs ---")
+    cur.execute("""
+        SELECT experiment_name, COUNT(*), COALESCE(gpu_name, 'unknown')
+        FROM runs
+        WHERE workload = 'gpu'
+        GROUP BY experiment_name, gpu_name
+    """)
+    rows = cur.fetchall()
+    if not rows:
+        print("  No GPU runs recorded yet")
+    else:
+        for row in rows:
+            print(f"  {row[0]:<20} {row[1]} runs  ({row[2]})")
+        cur.execute("SELECT COUNT(*) FROM gpu_samples")
+        print(f"  GPU telemetry samples: {cur.fetchone()[0]}")
 
     # ----------------------------
     # REGISTRY SUMMARY

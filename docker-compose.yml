@@ -63,3 +63,35 @@ services:
     command: ["python", "scripts/batch_run.py"]
     profiles:
       - cpu
+
+  # -------------------------------------------------------
+  # PIPELINE ON A GPU — runs CPU and GPU experiments
+  # Needs an NVIDIA GPU, driver, and NVIDIA Container Toolkit on the host.
+  # Usage: docker compose --profile gpu run --service-ports gpu_pipeline
+  # -------------------------------------------------------
+  gpu_pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    stdin_open: true
+    tty: true
+    ports:
+      - "8501:8501"
+    environment:
+      - RUNNING_IN_DOCKER=1
+    volumes:
+      - ./results:/app/results
+      - ./databases:/app/databases
+      - ./plots:/app/plots
+      - ./paper_figures:/app/paper_figures
+      - ./snapshots:/app/snapshots
+    command: ["python", "scripts/batch_run.py"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    profiles:
+      - gpu
